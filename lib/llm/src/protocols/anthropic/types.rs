@@ -194,7 +194,7 @@ impl AnthropicCreateMessageRequest {
         let mut total_len: usize = 0;
 
         if let Some(system) = &self.system {
-            total_len += system.len();
+            total_len += system.text.len();
         }
 
         for msg in &self.messages {
@@ -218,7 +218,9 @@ impl AnthropicCreateMessageRequest {
                 if let Some(desc) = &tool.description {
                     total_len += desc.len();
                 }
-                total_len += tool.input_schema.to_string().len();
+                if let Some(schema) = &tool.input_schema {
+                    total_len += schema.to_string().len();
+                }
             }
         }
 
