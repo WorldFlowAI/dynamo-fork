@@ -1760,8 +1760,8 @@ async fn list_models_openai(
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
-        let context_window = context_window_override
-            .or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
+        let context_window =
+            context_window_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
             object: "model", // Per OpenAI spec, this should be "model"
