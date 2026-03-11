@@ -105,9 +105,11 @@ impl AnthropicStreamConverter {
     ) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
 
-        // Capture real token usage from engine when available (typically on the final chunk).
+        // Capture token usage from engine when available (typically on the final chunk).
+        // Only update output_token_count — input_token_count is set once from the
+        // estimate in new() and must stay consistent between message_start and
+        // message_delta to avoid Claude Code's token display jumping.
         if let Some(usage) = &chunk.usage {
-            self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
             self.cached_token_count = usage
                 .prompt_tokens_details
@@ -445,7 +447,7 @@ impl AnthropicStreamConverter {
         let mut events = Vec::new();
 
         if let Some(usage) = &chunk.usage {
-            self.input_token_count = usage.prompt_tokens;
+            // Only update output — keep input estimate consistent (see process_chunk).
             self.output_token_count = usage.completion_tokens;
             self.cached_token_count = usage
                 .prompt_tokens_details
