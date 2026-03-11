@@ -531,18 +531,21 @@ class ManagedDeployment:
             lines = []
             for pod in pods.items:
                 pod_name = pod.metadata.name
-                phase = pod.status.phase if pod.status else "Unknown"
+                pod_status = pod.status
+                phase = pod_status.phase if pod_status else "Unknown"
                 container_lines = []
-                for cs in pod.status.container_statuses or []:
-                    if cs.state.waiting:
+                for cs in (
+                    (pod_status.container_statuses or []) if pod_status else []
+                ):
+                    if cs.state and cs.state.waiting:
                         state = f"Waiting: {cs.state.waiting.reason}"
                         if cs.state.waiting.message:
                             state += f" ({cs.state.waiting.message[:120]})"
-                    elif cs.state.terminated:
+                    elif cs.state and cs.state.terminated:
                         state = f"Terminated: {cs.state.terminated.reason}"
                         if cs.state.terminated.exit_code:
                             state += f" (exit {cs.state.terminated.exit_code})"
-                    elif cs.state.running:
+                    elif cs.state and cs.state.running:
                         state = "Running"
                     else:
                         state = "Unknown"
@@ -550,10 +553,12 @@ class ManagedDeployment:
                     container_lines.append(
                         f"    {cs.name}: {state} (restarts: {restarts})"
                     )
+                if not container_lines:
+                    container_lines.append("    (no container status yet)")
                 lines.append(f"  {pod_name} [{phase}]")
                 lines.extend(container_lines)
             return "\n".join(lines) if lines else "  (no pods found)"
-        except Exception as e:
+        except exceptions.ApiException as e:
             return f"  (failed to collect pod status: {e})"
 
     async def _wait_for_pods(self, label, expected, timeout=300):
@@ -706,7 +711,8 @@ class ManagedDeployment:
         elapsed = time.time() - start_time
         pod_summary = await self._get_pod_status_summary()
         raise TimeoutError(
-            f"Deployment {self._deployment_name} failed to become ready "
+            f"Deployment {self._deployment_name} failed to reach "
+            f"Ready={desired_ready_condition_val}, state={desired_state_val} "
             f"within {timeout}s (elapsed: {elapsed:.1f}s)\n"
             f"Pod status at timeout:\n{pod_summary}"
         )
