@@ -1731,6 +1731,7 @@ fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
 /// }
 async fn list_models_openai(
     State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
 
@@ -1756,15 +1757,54 @@ async fn list_models_openai(
         .ok()
         .and_then(|v| v.parse().ok());
 
-    let mut data = Vec::new();
-
     let models: HashSet<String> = state.manager().model_display_names();
+
+    // If the request includes `anthropic-version` header, return the Anthropic
+    // model listing format. Claude Code sends this header on all requests when
+    // connected via ANTHROPIC_BASE_URL and uses `context_window` from this
+    // response to manage its context budget.
+    if headers.contains_key("anthropic-version") {
+        let data: Vec<serde_json::Value> = models
+            .iter()
+            .map(|model_name| {
+                let context_window = context_window_override
+                    .or_else(|| card_map.get(model_name).map(|&cl| cl as u64));
+                let mut obj = serde_json::json!({
+                    "id": model_name,
+                    "display_name": model_name,
+                    "type": "model",
+                    "created_at": created,
+                });
+                if let Some(cw) = context_window {
+                    obj["context_window"] = serde_json::json!(cw);
+                }
+                if let Some(mot) = max_output_tokens {
+                    obj["max_output_tokens"] = serde_json::json!(mot);
+                }
+                obj
+            })
+            .collect();
+
+        let first_id = data.first().and_then(|d| d["id"].as_str().map(String::from));
+        let last_id = data.last().and_then(|d| d["id"].as_str().map(String::from));
+
+        return Ok(Json(serde_json::json!({
+            "data": data,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id,
+        }))
+        .into_response());
+    }
+
+    // Default: OpenAI format
+    let mut data = Vec::new();
     for model_name in models {
         let context_window =
             context_window_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
-            object: "model", // Per OpenAI spec, this should be "model"
+            object: "model",
             created,
             owned_by: "nvidia".to_string(),
             context_window,
