@@ -1025,7 +1025,7 @@ mod tests {
     /// Multiple tool calls: each gets inline content_block_stop.
     #[test]
     fn test_multiple_tool_calls_each_stopped_inline() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         let events1 = conv.process_chunk_tagged(&tool_call_chunk(
             0,
