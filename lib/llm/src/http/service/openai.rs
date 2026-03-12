@@ -1886,6 +1886,72 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
+/// Retrieve a single model by ID.
+///
+/// Returns the model in Anthropic format (with `context_window`) when the
+/// `anthropic-version` header is present, otherwise OpenAI format.
+/// The model ID may contain slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`),
+/// which is why this uses a wildcard `/{*model_id}` path parameter.
+async fn get_model_openai(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(ErrorMessage::model_not_found());
+    }
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let cards = state.manager().get_model_cards();
+    let context_length = cards
+        .iter()
+        .find(|c| c.display_name == model_id)
+        .map(|c| c.context_length as u64);
+    let context_window = std::env::var("DYN_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or(context_length);
+    let max_output_tokens: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
+    if headers.contains_key("anthropic-version") {
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "display_name": model_id,
+            "type": "model",
+            "created_at": created,
+        });
+        if let Some(cw) = context_window {
+            obj["context_window"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = max_output_tokens {
+            obj["max_output_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    } else {
+        Ok(Json(ModelListing {
+            id: model_id.to_string(),
+            object: "model",
+            created,
+            owned_by: "nvidia".to_string(),
+            context_window,
+            max_output_tokens,
+        })
+        .into_response())
+    }
+}
+
 /// List Models
 pub fn list_models_router(
     state: Arc<service_v2::State>,
@@ -1895,11 +1961,18 @@ pub fn list_models_router(
     let openai_path = path.unwrap_or("/v1/models".to_string());
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
 
+    // Individual model retrieval — wildcard to support model IDs with slashes.
+    // Must be registered as a separate .route() because axum doesn't allow
+    // combining exact and wildcard segments in a single route definition.
+    let retrieve_path = format!("{}/{{*model_id}}", openai_path);
+    let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
+        .route(&retrieve_path, get(get_model_openai))
         .with_state(state);
 
-    (vec![doc_for_openai], router)
+    (vec![doc_for_openai, doc_for_retrieve], router)
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
