@@ -1785,7 +1785,9 @@ async fn list_models_openai(
             })
             .collect();
 
-        let first_id = data.first().and_then(|d| d["id"].as_str().map(String::from));
+        let first_id = data
+            .first()
+            .and_then(|d| d["id"].as_str().map(String::from));
         let last_id = data.last().and_then(|d| d["id"].as_str().map(String::from));
 
         return Ok(Json(serde_json::json!({
