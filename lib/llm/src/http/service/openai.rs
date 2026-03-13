@@ -1764,6 +1764,10 @@ async fn list_models_openai(
     // connected via ANTHROPIC_BASE_URL and uses `context_window` from this
     // response to manage its context budget.
     if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
         let data: Vec<serde_json::Value> = models
             .iter()
             .map(|model_name| {
@@ -1773,7 +1777,7 @@ async fn list_models_openai(
                     "id": model_name,
                     "display_name": model_name,
                     "type": "model",
-                    "created_at": created,
+                    "created_at": created_at,
                 });
                 if let Some(cw) = context_window {
                     obj["context_window"] = serde_json::json!(cw);
@@ -1928,11 +1932,15 @@ async fn get_model_openai(
         .and_then(|v| v.parse().ok());
 
     if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
         let mut obj = serde_json::json!({
             "id": model_id,
             "display_name": model_id,
             "type": "model",
-            "created_at": created,
+            "created_at": created_at,
         });
         if let Some(cw) = context_window {
             obj["context_window"] = serde_json::json!(cw);
