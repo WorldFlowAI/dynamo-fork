@@ -19,6 +19,7 @@ use crate::protocols::openai::ParsingOptions;
 use crate::types::{
     generic::tensor::TensorStreamingEngine,
     openai::{
+        audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
@@ -152,6 +153,13 @@ impl Model {
             .any(|entry| entry.value().has_videos_engine())
     }
 
+    /// Check if any WorkerSet has an audios engine.
+    pub fn has_audios_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_audios_engine())
+    }
+
     /// Check if a candidate checksum is valid for this model.
     /// Returns `Some(true)` if it matches the canonical checksum, `Some(false)` if it
     /// doesn't match, or `None` if no canonical checksum has been set yet (no WorkerSets).
@@ -212,6 +220,11 @@ impl Model {
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+    }
+
+    pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.audios_engine.clone())
             .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
     }
 

@@ -303,6 +303,9 @@ pub enum Endpoint {
     /// OAI Videos
     Videos,
 
+    /// OAI Audio Speech
+    Audios,
+
     /// OAI Responses
     Responses,
 
@@ -993,6 +996,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
+            Endpoint::Audios => write!(f, "audios"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
@@ -1008,6 +1012,7 @@ impl Endpoint {
             Endpoint::Embeddings => "embeddings",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
+            Endpoint::Audios => "audios",
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",

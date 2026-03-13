@@ -14,6 +14,11 @@ from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+from dynamo.common.protocols.audio_protocol import (
+    AudioData,
+    NvAudioSpeechResponse,
+    NvCreateAudioSpeechRequest,
+)  # noqa: F401 — AudioNvExt removed; TTS params are top-level
 from dynamo.common.protocols.image_protocol import (
     ImageData,
     NvCreateImageRequest,
@@ -37,6 +42,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
 
+# TTS constants (matching vLLM-Omni)
+_TTS_LANGUAGES = {
+    "Auto", "Chinese", "English", "Japanese", "Korean",
+    "German", "French", "Russian", "Portuguese", "Spanish", "Italian",
+}
+_TTS_MAX_INSTRUCTIONS_LENGTH = 500
+_TTS_MAX_NEW_TOKENS_MIN = 1
+_TTS_MAX_NEW_TOKENS_MAX = 4096
+_REF_AUDIO_TIMEOUT_S = 15
+_REF_AUDIO_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+
 
 @dataclass
 class EngineInputs:
@@ -52,7 +68,7 @@ class EngineInputs:
             image requests). None means use the default for the request type.
     """
 
-    prompt: OmniTextPrompt
+    prompt: Union[OmniTextPrompt, Dict[str, Any]]
     sampling_params_list: list | None = None
     request_type: RequestType = RequestType.CHAT_COMPLETION
     fps: int = 0
@@ -62,7 +78,7 @@ class EngineInputs:
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, and text-to-video generation.
+    Handles text-to-text, text-to-image, text-to-video, and text-to-audio generation.
     """
 
     def __init__(
@@ -120,7 +136,7 @@ class OmniHandler(BaseOmniHandler):
         parsed_request, request_type = parse_request_type(
             request, self.config.output_modalities
         )
-        inputs = self.build_engine_inputs(parsed_request, request_type)
+        inputs = await self.build_engine_inputs(parsed_request, request_type)
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -173,6 +189,18 @@ class OmniHandler(BaseOmniHandler):
                         if chunk:
                             yield chunk
 
+                    elif stage_output.final_output_type == "audio":
+                        mm_output = stage_output.multimodal_output
+                        if mm_output:
+                            chunk = await self._format_audio_chunk(
+                                mm_output,
+                                request_id,
+                                response_format=inputs.response_format,
+                                request_type=inputs.request_type,
+                            )
+                            if chunk:
+                                yield chunk
+
             except GeneratorExit:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
@@ -180,10 +208,13 @@ class OmniHandler(BaseOmniHandler):
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e))
 
-    def build_engine_inputs(
+    async def build_engine_inputs(
         self,
         parsed_request: Union[
-            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+            NvCreateImageRequest,
+            NvCreateVideoRequest,
+            NvCreateAudioSpeechRequest,
+            Dict[str, Any],
         ],
         request_type: RequestType,
     ) -> EngineInputs:
@@ -191,7 +222,7 @@ class OmniHandler(BaseOmniHandler):
 
         Args:
             parsed_request: Output from parse_request_type -- a Pydantic model
-                for image/video requests, or a raw dict for chat completions.
+                for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
 
         Returns:
@@ -203,29 +234,23 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
             return self._engine_inputs_from_video(parsed_request)
-
         elif request_type == RequestType.AUDIO_GENERATION:
-            raise NotImplementedError("Audio generation is not yet supported")
+            return await self._engine_inputs_from_audio(parsed_request)
 
         raise ValueError(f"Unknown request type: {request_type}")
 
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
-        # Chat completions request does not support extra_body passthrough
-        # So, we can't extract any diffusion related params from the raw_request
-        # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
         prompt = OmniTextPrompt(prompt=text_prompt)
 
-        sampling_params_list = None
-
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=sampling_params_list,
+            sampling_params_list=None,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
@@ -312,6 +337,376 @@ class OmniHandler(BaseOmniHandler):
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
         )
+
+    def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
+        """Validate TTS request parameters. Raises ValueError on invalid input.
+
+        Matches vLLM-Omni's _validate_tts_request() rules.
+        """
+        task_type = req.task_type or "CustomVoice"
+
+        if not req.input or not req.input.strip():
+            raise ValueError("Input text cannot be empty")
+
+        if req.language is not None and req.language not in _TTS_LANGUAGES:
+            raise ValueError(
+                f"Invalid language '{req.language}'. "
+                f"Supported: {', '.join(sorted(_TTS_LANGUAGES))}"
+            )
+
+        if task_type == "Base" and req.ref_audio is None:
+            raise ValueError("Base task requires 'ref_audio' for voice cloning")
+
+        if task_type != "Base":
+            if req.ref_text is not None:
+                raise ValueError("'ref_text' is only valid for Base task")
+
+        if task_type == "VoiceDesign" and not req.instructions:
+            raise ValueError(
+                "VoiceDesign task requires 'instructions' to describe the voice"
+            )
+
+        if (
+            req.instructions
+            and len(req.instructions) > _TTS_MAX_INSTRUCTIONS_LENGTH
+        ):
+            raise ValueError(
+                f"Instructions too long (max {_TTS_MAX_INSTRUCTIONS_LENGTH} characters)"
+            )
+
+        if req.max_new_tokens is not None:
+            if req.max_new_tokens < _TTS_MAX_NEW_TOKENS_MIN:
+                raise ValueError(
+                    f"max_new_tokens must be at least {_TTS_MAX_NEW_TOKENS_MIN}"
+                )
+            if req.max_new_tokens > _TTS_MAX_NEW_TOKENS_MAX:
+                raise ValueError(
+                    f"max_new_tokens cannot exceed {_TTS_MAX_NEW_TOKENS_MAX}"
+                )
+
+    async def _resolve_ref_audio(
+        self, ref_audio_str: str
+    ) -> tuple:
+        """Download or decode reference audio for voice cloning.
+
+        Supports HTTP/HTTPS URLs and base64 data URIs.
+        Returns (wav_samples_list, sample_rate).
+        """
+        import io
+
+        import numpy as np
+        import soundfile as sf
+
+        if ref_audio_str.startswith(("http://", "https://")):
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    ref_audio_str, timeout=aiohttp.ClientTimeout(total=_REF_AUDIO_TIMEOUT_S)
+                ) as resp:
+                    if resp.status != 200:
+                        raise ValueError(
+                            f"Failed to download ref_audio: HTTP {resp.status}"
+                        )
+                    audio_bytes = await resp.read()
+                    if len(audio_bytes) > _REF_AUDIO_MAX_BYTES:
+                        raise ValueError(
+                            f"ref_audio too large ({len(audio_bytes)} bytes, max {_REF_AUDIO_MAX_BYTES})"
+                        )
+        elif ref_audio_str.startswith("data:"):
+            # base64 data URI: data:audio/wav;base64,XXXX
+            _, encoded = ref_audio_str.split(",", 1)
+            audio_bytes = base64.b64decode(encoded)
+        else:
+            raise ValueError(
+                "ref_audio must be a URL (http/https) or base64 data URI (data:...)"
+            )
+
+        wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        return wav_data.tolist(), int(sr)
+
+    def _estimate_prompt_len(self, tts_params: Dict[str, Any]) -> int:
+        """Estimate TTS prompt length using tokenizer if available, else heuristic."""
+        try:
+            from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
+                Qwen3TTSTalkerForConditionalGeneration,
+            )
+
+            if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
+                from transformers import AutoTokenizer
+
+                self._tts_tokenizer = AutoTokenizer.from_pretrained(
+                    self.config.model,
+                    trust_remote_code=True,
+                    padding_side="left",
+                )
+
+            hf_config = self.engine_client.model_config.hf_config
+            talker_config = getattr(hf_config, "talker_config", None)
+            task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
+
+            return Qwen3TTSTalkerForConditionalGeneration.estimate_prompt_len_from_additional_information(
+                additional_information=tts_params,
+                task_type=task_type,
+                tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
+                    "input_ids"
+                ],
+                codec_language_id=getattr(talker_config, "codec_language_id", None)
+                if talker_config
+                else None,
+                spk_is_dialect=getattr(talker_config, "spk_is_dialect", None)
+                if talker_config
+                else None,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to estimate TTS prompt length, using fallback 2048: {e}"
+            )
+            return 2048
+
+    async def _engine_inputs_from_audio(
+        self, req: NvCreateAudioSpeechRequest
+    ) -> EngineInputs:
+        """Build engine inputs from an NvCreateAudioSpeechRequest.
+
+        TTS models use a 2-stage pipeline (Talker AR -> Code2Wav) and require
+        a special prompt format with prompt_token_ids (placeholders) and
+        additional_information (TTS parameters like text, voice, language).
+        This follows the vLLM-Omni TTS serving pattern.
+        """
+        # Validate first
+        self._validate_tts_request(req)
+
+        # Normalize voice to lowercase (case-insensitive matching)
+        if req.voice is not None:
+            req.voice = req.voice.lower()
+
+        task_type = req.task_type or "CustomVoice"
+
+        # Build TTS parameters following vLLM-Omni's _build_tts_params() format
+        tts_params: Dict[str, Any] = {
+            "text": [req.input],
+            "task_type": [task_type],
+            "language": [req.language or "Auto"],
+            "instruct": [req.instructions or ""],
+            "max_new_tokens": [req.max_new_tokens or 2048],
+        }
+
+        # Speaker — default to Vivian for CustomVoice (matching vLLM-Omni)
+        if req.voice is not None:
+            tts_params["speaker"] = [req.voice]
+        elif task_type == "CustomVoice":
+            tts_params["speaker"] = ["Vivian"]
+
+        # Voice cloning params (Base task)
+        if req.ref_audio is not None:
+            wav_list, sr = await self._resolve_ref_audio(req.ref_audio)
+            tts_params["ref_audio"] = [[wav_list, sr]]
+        if req.ref_text is not None:
+            tts_params["ref_text"] = [req.ref_text]
+
+        # VoiceDesign requires non_streaming_mode
+        if task_type == "VoiceDesign":
+            tts_params["non_streaming_mode"] = [True]
+
+        # Estimate prompt length using tokenizer (fallback: 2048)
+        estimated_len = self._estimate_prompt_len(tts_params)
+
+        prompt = {
+            "prompt_token_ids": [1] * estimated_len,
+            "additional_information": tts_params,
+        }
+
+        logger.info(
+            f"Audio TTS request: input='{req.input[:50]}...', "
+            f"voice={tts_params.get('speaker', ['N/A'])[0]}, "
+            f"task_type={task_type}, prompt_len={estimated_len}"
+        )
+
+        return EngineInputs(
+            prompt=prompt,
+            sampling_params_list=None,
+            request_type=RequestType.AUDIO_GENERATION,
+            response_format=req.response_format,
+        )
+
+    def _extract_audio_tensor(
+        self, mm_output: Dict[str, Any]
+    ) -> tuple:
+        """Extract audio tensor and sample rate from multimodal_output dict.
+
+        vLLM-Omni TTS models return audio in multimodal_output with keys
+        "audio" or "model_outputs" for the waveform, and "sr" for sample rate.
+
+        Returns:
+            (audio_numpy, sample_rate) tuple.
+        """
+        import numpy as np
+        import torch
+
+        # Find audio tensor — key is "audio" or "model_outputs"
+        audio_key = "audio" if "audio" in mm_output else "model_outputs"
+        audio_val = mm_output.get(audio_key)
+        if audio_val is None:
+            raise ValueError(
+                f"No audio data in multimodal_output. Keys: {list(mm_output.keys())}"
+            )
+
+        # Handle cumulative list mode (streaming chunks)
+        if isinstance(audio_val, list):
+            audio_val = torch.cat(audio_val, dim=-1)
+
+        # Convert to numpy float32
+        if hasattr(audio_val, "float"):
+            audio_np = audio_val.float().detach().cpu().numpy()
+        elif isinstance(audio_val, np.ndarray):
+            audio_np = audio_val.astype(np.float32)
+        else:
+            audio_np = np.array(audio_val, dtype=np.float32)
+
+        # Squeeze extra dimensions (e.g. [1, N] -> [N])
+        if audio_np.ndim > 1:
+            audio_np = audio_np.squeeze()
+
+        # Extract sample rate
+        sr_raw = mm_output.get("sr", 24000)
+        if isinstance(sr_raw, list):
+            sr_raw = sr_raw[-1] if sr_raw else 24000
+        sample_rate = sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
+
+        return audio_np, sample_rate
+
+    def _encode_audio(
+        self, audio_np, sample_rate: int, fmt: str = "wav", speed: float = 1.0
+    ) -> tuple:
+        """Encode a numpy float32 waveform to audio bytes.
+
+        Uses soundfile for multi-format support (wav, pcm, flac, mp3, aac, opus).
+        Applies speed adjustment via librosa if speed != 1.0.
+
+        Returns:
+            (audio_bytes, media_type) tuple.
+        """
+        import soundfile as sf
+
+        # Apply speed adjustment
+        if speed != 1.0:
+            try:
+                import librosa
+
+                audio_np = librosa.effects.time_stretch(y=audio_np, rate=speed)
+            except ImportError:
+                logger.warning(
+                    "librosa not installed, ignoring speed adjustment"
+                )
+
+        fmt = (fmt or "wav").lower()
+        format_map = {
+            "wav": ("WAV", "audio/wav", {}),
+            "pcm": ("RAW", "audio/pcm", {"subtype": "PCM_16"}),
+            "flac": ("FLAC", "audio/flac", {}),
+            "mp3": ("MP3", "audio/mpeg", {}),
+            "aac": ("AAC", "audio/aac", {}),
+            "opus": ("OGG", "audio/ogg", {"subtype": "OPUS"}),
+        }
+
+        if fmt not in format_map:
+            logger.warning(f"Unsupported format '{fmt}', defaulting to wav")
+            fmt = "wav"
+
+        sf_format, media_type, kwargs = format_map[fmt]
+
+        buf = BytesIO()
+        sf.write(buf, audio_np, sample_rate, format=sf_format, **kwargs)
+        return buf.getvalue(), media_type
+
+    async def _format_audio_chunk(
+        self,
+        mm_output: Dict[str, Any],
+        request_id: str,
+        response_format: str | None = None,
+        request_type: RequestType = RequestType.AUDIO_GENERATION,
+        speed: float = 1.0,
+    ) -> Dict[str, Any] | None:
+        """Format multimodal audio output for the response.
+
+        Args:
+            mm_output: The multimodal_output dict from OmniRequestOutput,
+                containing audio tensors ("audio" or "model_outputs") and
+                sample rate ("sr").
+            request_id: Unique request identifier.
+            response_format: Audio format (wav, mp3, pcm, etc.) or "url".
+            request_type: Chat completion or dedicated audio generation.
+            speed: Speed adjustment factor (1.0 = normal).
+
+        Returns:
+            Formatted response dict, or None if no audio.
+        """
+        if not mm_output:
+            return self._error_chunk(request_id, "No audio generated")
+
+        try:
+            start_time = time.time()
+
+            # Extract tensor
+            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+
+            # Determine encoding format (url is a storage mode, not an audio format)
+            encode_fmt = "wav" if response_format in (None, "url", "b64_json") else response_format
+
+            # Encode audio with format and speed
+            audio_bytes, media_type = await asyncio.to_thread(
+                self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+            )
+
+            logger.info(
+                f"Audio encoded for request {request_id}: "
+                f"{len(audio_np)} samples, sr={sample_rate}, "
+                f"{len(audio_bytes)} bytes {encode_fmt}"
+            )
+
+            inference_time = time.time() - start_time
+
+            # Build response data
+            if response_format == "url":
+                ext = encode_fmt if encode_fmt != "opus" else "ogg"
+                storage_path = f"audios/{request_id}/{uuid.uuid4()}.{ext}"
+                url = await upload_to_fs(
+                    self.media_output_fs,
+                    storage_path,
+                    audio_bytes,
+                    self.media_output_http_url,
+                )
+                audio_data_obj = AudioData(url=url)
+            else:
+                b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                audio_data_obj = AudioData(b64_json=b64)
+
+            response = NvAudioSpeechResponse(
+                id=request_id,
+                object="audio.speech",
+                model=self.config.served_model_name or self.config.model,
+                status="completed",
+                progress=100,
+                created=int(time.time()),
+                data=[audio_data_obj],
+                inference_time_s=inference_time,
+            )
+            return response.model_dump()
+
+        except Exception as e:
+            logger.error(f"Failed to process audio for request {request_id}: {e}")
+            error_response = NvAudioSpeechResponse(
+                id=request_id,
+                object="audio.speech",
+                model=self.config.served_model_name or self.config.model,
+                status="failed",
+                progress=0,
+                created=int(time.time()),
+                data=[],
+                error=str(e),
+            )
+            return error_response.model_dump()
 
     async def _prepare_image_output(
         self, images: list, request_id: str, response_format: str | None = None

@@ -10,6 +10,7 @@ use super::{
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 
+pub mod audios;
 pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;

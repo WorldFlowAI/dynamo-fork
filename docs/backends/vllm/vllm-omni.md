@@ -4,7 +4,7 @@
 title: vLLM-Omni
 ---
 
-Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, and text-to-video capabilities via OpenAI-compatible API endpoints.
+Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, text-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.
 
 ## Prerequisites
 
@@ -25,8 +25,9 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
 | Text-to-Text | `/v1/chat/completions` | `text` (default) |
 | Text-to-Image | `/v1/chat/completions`, `/v1/images/generations` | `image` |
 | Text-to-Video | `/v1/videos` | `video` |
+| Text-to-Audio (TTS) | `/v1/audio/speech`, `/v1/chat/completions` | `audio` |
 
-The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`.
+The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, both `/v1/audio/speech` and `/v1/chat/completions` (returns inline base64 audio) are available.
 
 ## Tested Models
 
@@ -35,6 +36,7 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
 | Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
+| Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`, `Qwen/Qwen3-TTS-12Hz-0.6B-Base` |
 
 To run a non-default model, pass `--model` to any launch script:
 
@@ -160,12 +162,62 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | `nvext.guidance_scale` | CFG guidance scale | 5.0 |
 | `nvext.seed` | Random seed for reproducibility | -- |
 
+## Text-to-Audio (TTS)
+
+Launch using the provided script with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_audio.sh
+```
+
+### Via `/v1/audio/speech`
+
+```bash
+curl -s http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "input": "Hello, how are you today?",
+    "voice": "vivian",
+    "response_format": "url"
+  }'
+```
+
+The response returns a JSON object with the audio URL:
+
+```json
+{
+  "id": "...",
+  "object": "audio.speech",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "status": "completed",
+  "data": [{"url": "file:///tmp/dynamo_media/audios/req-abc123.wav"}]
+}
+```
+
+The `/v1/audio/speech` endpoint also accepts NVIDIA extensions via the `nvext` field:
+
+| Field | Description | Default |
+|---|---|---|
+| `nvext.language` | Language (Auto, Chinese, English, Japanese, etc.) | Auto |
+| `nvext.task_type` | Task type: CustomVoice, VoiceDesign, or Base | -- |
+| `nvext.max_new_tokens` | Maximum tokens to generate | 2048 |
+| `nvext.ref_audio` | Reference audio URL/base64 (for voice cloning) | -- |
+| `nvext.ref_text` | Reference transcript (for voice cloning) | -- |
+| `nvext.seed` | Random seed for reproducibility | -- |
+
+To use a different TTS model:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_audio.sh --model Qwen/Qwen3-TTS-12Hz-0.6B-Base
+```
+
 ## CLI Reference
 
 | Flag | Description |
 |---|---|
 | `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
-| `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
+| `--output-modalities <modality>` | Output modality: `text`, `image`, `video`, or `audio` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
 | _(no `--kv-transfer-config`)_ | KV connector is disabled by default; omit the flag for omni workers |
 | `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
@@ -173,7 +225,7 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 
 ## Storage Configuration
 
-Generated images and videos are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
+Generated images, videos, and audio files are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
 
 By default, media is written to the local filesystem at `file:///tmp/dynamo_media`. To use cloud storage:
 

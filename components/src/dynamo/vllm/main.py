@@ -975,6 +975,32 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
+def _ensure_dummy_tokenizer_for_tts(model: str):
+    """Create a minimal tokenizer.json for TTS models that lack one.
+
+    Audio/TTS models (e.g., Qwen3-TTS) use a custom speech tokenizer and don't
+    ship the standard tokenizer.json expected by the Rust ModelDeploymentCard
+    loader. This writes a placeholder so register_model doesn't fail.
+    """
+    import json
+    from pathlib import Path
+
+    from huggingface_hub import scan_cache_dir
+
+    cache_info = scan_cache_dir()
+    for repo in cache_info.repos:
+        if repo.repo_id == model:
+            for revision in repo.revisions:
+                tokenizer_path = Path(revision.snapshot_path) / "tokenizer.json"
+                if not tokenizer_path.exists():
+                    logger.warning(
+                        f"TTS model {model} has no tokenizer.json; "
+                        f"creating a minimal placeholder at {tokenizer_path}"
+                    )
+                    tokenizer_path.write_text(json.dumps({"version": "1.0"}))
+            return
+
+
 async def init_omni(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
@@ -1021,6 +1047,13 @@ async def init_omni(
     if model_type is None:
         # Default to Images
         model_type = ModelType.Images
+
+    # Audio/TTS models (e.g., Qwen3-TTS) don't ship a standard tokenizer.json,
+    # which causes register_model to fail when building the ModelDeploymentCard.
+    # Create a minimal placeholder so the Rust card loader doesn't bail.
+    if "audio" in config.output_modalities:
+        _ensure_dummy_tokenizer_for_tts(config.model)
+
     await register_model(
         ModelInput.Text,
         model_type,

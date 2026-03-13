@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
+    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
     from dynamo.common.utils.output_modalities import RequestType
@@ -116,11 +117,16 @@ class TestBuildEngineInputs:
         assert inputs.prompt["prompt"] == "a drone"
         assert inputs.fps > 0
 
-    def test_audio_not_implemented(self):
-        """Audio generation raises NotImplementedError."""
+    def test_audio_generation(self):
+        """Audio request parses input text and voice into engine inputs."""
         handler = _make_handler()
-        with pytest.raises(NotImplementedError):
-            handler.build_engine_inputs({}, RequestType.AUDIO_GENERATION)
+        req = NvCreateAudioSpeechRequest(
+            model="test-tts", input="Hello world", voice="vivian"
+        )
+        inputs = handler.build_engine_inputs(req, RequestType.AUDIO_GENERATION)
+        assert inputs.request_type == RequestType.AUDIO_GENERATION
+        assert inputs.prompt["prompt"] == "Hello world"
+        assert inputs.sampling_params_list is None
 
 
 class TestFormatTextChunk:
@@ -230,3 +236,60 @@ class TestFormatVideoChunk:
             chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
+
+
+class TestPrepareAudioOutput:
+    @pytest.mark.asyncio
+    async def test_b64_default(self):
+        """None response_format defaults to base64 encoding."""
+        handler = _make_handler()
+        result = await handler._prepare_audio_output(b"fake_wav_data", "req-1", None)
+        assert result.startswith("data:audio/wav;base64,")
+
+    @pytest.mark.asyncio
+    async def test_b64_explicit(self):
+        """b64_json format returns data URI with audio prefix."""
+        handler = _make_handler()
+        result = await handler._prepare_audio_output(
+            b"fake_wav_data", "req-1", "b64_json"
+        )
+        assert result.startswith("data:audio/wav;base64,")
+
+
+class TestFormatAudioChunk:
+    @pytest.mark.asyncio
+    async def test_audio_generation_b64_format(self):
+        """Audio generation with default format returns b64_json data."""
+        handler = _make_handler()
+        chunk = await handler._format_audio_chunk(
+            b"fake_audio",
+            "req-1",
+            response_format=None,
+            request_type=RequestType.AUDIO_GENERATION,
+        )
+        assert chunk["object"] == "audio.speech"
+        assert chunk["status"] == "completed"
+        assert chunk["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_format(self):
+        """Chat completion route returns audio data in delta."""
+        handler = _make_handler()
+        chunk = await handler._format_audio_chunk(
+            b"fake_audio",
+            "req-1",
+            request_type=RequestType.CHAT_COMPLETION,
+        )
+        assert chunk["object"] == "chat.completion.chunk"
+        assert "audio" in chunk["choices"][0]["delta"]
+
+    @pytest.mark.asyncio
+    async def test_empty_audio_returns_error(self):
+        """Empty audio bytes produce an error chunk."""
+        handler = _make_handler()
+        chunk = await handler._format_audio_chunk(
+            b"",
+            "req-1",
+            request_type=RequestType.AUDIO_GENERATION,
+        )
+        assert "Error" in chunk["choices"][0]["delta"]["content"]
