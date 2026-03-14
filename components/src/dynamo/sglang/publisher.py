@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import ipaddress
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -10,7 +11,7 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+from sglang.srt.utils import get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -23,6 +24,15 @@ from dynamo.common.utils.prometheus import (
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
+
+
+def maybe_wrap_ipv6_address(address: str) -> str:
+    """Wrap IPv6 addresses in square brackets for use in URLs/endpoints."""
+    try:
+        ipaddress.IPv6Address(address)
+        return f"[{address}]"
+    except ValueError:
+        return address
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
