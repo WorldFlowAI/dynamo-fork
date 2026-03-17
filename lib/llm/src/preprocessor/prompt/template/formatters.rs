@@ -74,6 +74,7 @@ impl Default for JinjaEnvironment {
 }
 
 impl HfTokenizerConfigJsonFormatter {
+    #[cfg(test)]
     pub fn new(config: ChatTemplate, mixins: ContextMixins) -> anyhow::Result<Self> {
         Self::with_options(config, mixins, true)
     }
