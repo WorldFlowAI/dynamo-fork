@@ -372,10 +372,17 @@ async def init_llm_worker(
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
-        # Propagate to env var so the Rust preprocessor can read it at init time
+        # Propagate to env var so the Rust preprocessor can read it at init time.
+        _prev = os.environ.get("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE", "<not set>")
         os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"] = str(
             config.exclude_tools_when_tool_choice_none
         ).lower()
+        logging.info(
+            "DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE: config=%s, prev_env=%s, new_env=%s",
+            config.exclude_tools_when_tool_choice_none,
+            _prev,
+            os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"],
+        )
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
