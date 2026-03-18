@@ -513,6 +513,107 @@ class TestPreprocessChatRequest:
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
 
+    def test_tool_choice_none_strips_tools_from_template(self, tokenizer):
+        """When exclude flag is on and tool_choice=none, tools are excluded from template."""
+        import os
+
+        os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"] = "true"
+        try:
+            with_tools_auto = preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                    "tool_choice": "auto",
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+            with_tools_none = preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                    "tool_choice": "none",
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+            # tool_choice=none should produce fewer tokens (no tool defs in template)
+            assert len(with_tools_none.prompt_token_ids) < len(
+                with_tools_auto.prompt_token_ids
+            ), "tool_choice=none with exclude flag should strip tools from template"
+        finally:
+            os.environ.pop("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE", None)
+
+    def test_tool_choice_none_keeps_tools_when_flag_off(self, tokenizer):
+        """When exclude flag is off, tool_choice=none still includes tools in template."""
+        import os
+
+        os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"] = "false"
+        try:
+            tool_request = {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+            }
+            with_auto = preprocess_chat_request(
+                {**tool_request, "tool_choice": "auto"},
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+            with_none = preprocess_chat_request(
+                {**tool_request, "tool_choice": "none"},
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+            # With flag off, both should have similar token counts (tools in template)
+            assert len(with_none.prompt_token_ids) == len(
+                with_auto.prompt_token_ids
+            ), "tool_choice=none with flag off should keep tools in template"
+        finally:
+            os.environ.pop("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE", None)
+
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
         result = preprocess_chat_request(
