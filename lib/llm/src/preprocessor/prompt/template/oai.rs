@@ -1248,10 +1248,8 @@ NORMAL_MODE
 {%- endif %}
 {{ messages[0].content }}"#;
 
-        let chat_template: super::tokcfg::ChatTemplate = serde_json::from_value(
-            serde_json::json!({ "chat_template": template }),
-        )
-        .unwrap();
+        let chat_template: super::tokcfg::ChatTemplate =
+            serde_json::from_value(serde_json::json!({ "chat_template": template })).unwrap();
 
         HfTokenizerConfigJsonFormatter::with_options(
             chat_template,
