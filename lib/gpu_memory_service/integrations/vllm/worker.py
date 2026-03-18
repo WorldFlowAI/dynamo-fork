@@ -82,6 +82,41 @@ class GMSWorker(Worker):
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
+        # Swap model_runner class to GMSModelRunner for shadow mode overrides
+        if is_shadow_mode() and hasattr(self, "model_runner"):
+            from gpu_memory_service.integrations.vllm.model_runner import (
+                GMSModelRunner,
+            )
+
+            self.model_runner.__class__ = GMSModelRunner
+            logger.info("[GMS] Injected GMSModelRunner via __class__ swap")
+
+    def determine_available_memory(self) -> int:
+        """Project available memory from total GPU capacity in shadow mode.
+
+        Shadow shares GPU with the active engine, so actual free memory is
+        tiny. We run profile_run for torch.compile then project from total.
+        """
+        if not is_shadow_mode():
+            return super().determine_available_memory()
+
+        torch.cuda.reset_peak_memory_stats()
+        self.model_runner.profile_run()
+        torch.cuda.synchronize()
+        non_kv_cache_memory = torch.cuda.max_memory_allocated()
+
+        projected_available = self.requested_memory - non_kv_cache_memory
+
+        logger.info(
+            "[GMS] Shadow mode: projected available memory "
+            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB)",
+            projected_available / (1 << 30),
+            self.requested_memory / (1 << 30),
+            non_kv_cache_memory / (1 << 30),
+        )
+
+        return int(projected_available)
+
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
 

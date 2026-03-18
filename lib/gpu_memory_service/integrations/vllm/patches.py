@@ -1,18 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GMS vLLM patches.
+"""GMS vLLM monkey-patches.
 
-Core patches are always applied. Shadow mode patches are gated by
-is_shadow_mode() in apply_shadow_mode_patches().
+These 3 patches remain as monkey-patches because their targets have no
+class injection point. Shadow mode method overrides live in model_runner.py
+(GMSModelRunner) and worker.py (GMSWorker).
 """
 
 from __future__ import annotations
 
 import logging
-import time
-
-import torch
 
 from gpu_memory_service import get_gms_client_memory_manager
 from gpu_memory_service.common.types import GrantedLockType
@@ -23,13 +21,10 @@ logger = logging.getLogger(__name__)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
-_initialize_kv_cache_tensors_patched = False
-_get_slot_mappings_patched = False
-_allocate_kv_cache_on_wake_added = False
 
 
 # =============================================================================
-# Core GMS patches (always applied)
+# Core GMS patch (always applied)
 # =============================================================================
 
 
@@ -78,7 +73,7 @@ def patch_memory_snapshot() -> None:
 
 
 # =============================================================================
-# Shadow mode patches (only applied when is_shadow_mode() is True)
+# Shadow mode monkey-patches (no class injection point available)
 # =============================================================================
 
 
@@ -114,40 +109,6 @@ def patch_request_memory() -> None:
     logger.info("[GMS Patch] Patched request_memory for shadow mode")
 
 
-def patch_determine_available_memory() -> None:
-    """Project available memory from total GPU capacity (shadow shares GPU)."""
-    try:
-        from vllm.v1.worker.gpu_worker import Worker
-    except ImportError:
-        logger.debug("[GMS Patch] Worker not available")
-        return
-
-    original_determine = Worker.determine_available_memory
-
-    def patched_determine_available_memory(self):
-        # Run profile for torch.compile; measure peak to get non-KV usage.
-        # max_memory_allocated() = weights + activations + buffers (PyTorch-managed).
-        torch.cuda.reset_peak_memory_stats()
-        self.model_runner.profile_run()
-        torch.cuda.synchronize()
-        non_kv_cache_memory = torch.cuda.max_memory_allocated()
-
-        projected_available = self.requested_memory - non_kv_cache_memory
-
-        logger.info(
-            "[GMS Patch] Shadow mode: projected available memory "
-            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB)",
-            projected_available / (1 << 30),
-            self.requested_memory / (1 << 30),
-            non_kv_cache_memory / (1 << 30),
-        )
-
-        return int(projected_available)
-
-    Worker.determine_available_memory = patched_determine_available_memory
-    logger.info("[GMS Patch] Patched determine_available_memory for shadow mode")
-
-
 def patch_register_kv_caches() -> None:
     """Skip NixlConnector.register_kv_caches when kv_caches is empty."""
     global _register_kv_caches_patched
@@ -176,207 +137,16 @@ def patch_register_kv_caches() -> None:
     logger.info("[GMS Patch] Patched NixlConnector.register_kv_caches")
 
 
-def patch_initialize_kv_cache_tensors() -> None:
-    """No-op during shadow init; store config for later allocation on wake."""
-    global _initialize_kv_cache_tensors_patched
-
-    if _initialize_kv_cache_tensors_patched:
-        return
-
-    try:
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    except ImportError:
-        logger.debug("[GMS Patch] GPUModelRunner not available")
-        return
-
-    original_initialize_kv_cache_tensors = GPUModelRunner.initialize_kv_cache_tensors
-
-    def patched_initialize_kv_cache_tensors(self, kv_cache_config, kernel_block_sizes):
-        if getattr(self, "_shadow_init_phase", False):
-            self._shadow_kv_cache_config = kv_cache_config
-            self._shadow_kernel_block_sizes = kernel_block_sizes
-            logger.info(
-                "[Shadow] Init phase: stored config, skipping KV cache allocation"
-            )
-            return {}
-
-        return original_initialize_kv_cache_tensors(
-            self, kv_cache_config, kernel_block_sizes
-        )
-
-    GPUModelRunner.initialize_kv_cache_tensors = patched_initialize_kv_cache_tensors
-    _initialize_kv_cache_tensors_patched = True
-    logger.info("[GMS Patch] Patched GPUModelRunner.initialize_kv_cache_tensors")
-
-
-def patch_get_slot_mappings() -> None:
-    """Return (None, None) when KV caches are empty.
-
-    _dummy_run() calls _get_slot_mappings() unconditionally during warmup.
-    Without KV tensors there is nothing to index into; returning (None, None)
-    makes KV write ops gracefully no-op.
-    """
-    global _get_slot_mappings_patched
-
-    if _get_slot_mappings_patched:
-        return
-
-    try:
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    except ImportError:
-        logger.debug("[GMS Patch] GPUModelRunner not available")
-        return
-
-    original_get_slot_mappings = GPUModelRunner._get_slot_mappings
-
-    def patched_get_slot_mappings(self, *args, **kwargs):
-        if not self.kv_caches:
-            return None, None
-        return original_get_slot_mappings(self, *args, **kwargs)
-
-    GPUModelRunner._get_slot_mappings = patched_get_slot_mappings
-    _get_slot_mappings_patched = True
-    logger.info("[GMS Patch] Patched GPUModelRunner._get_slot_mappings")
-
-
-def patch_allocate_kv_cache_on_wake() -> None:
-    """Add allocate_kv_cache_on_wake to GPUModelRunner.
-
-    Called by GMSWorker.wake_up() after _shadow_init_phase is cleared.
-    Waits for GPU memory to be freed (60 s timeout), then allocates.
-    """
-    global _allocate_kv_cache_on_wake_added
-
-    if _allocate_kv_cache_on_wake_added:
-        return
-
-    try:
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    except ImportError:
-        logger.debug("[GMS Patch] GPUModelRunner not available")
-        return
-
-    if hasattr(GPUModelRunner, "allocate_kv_cache_on_wake"):
-        logger.debug("[GMS Patch] allocate_kv_cache_on_wake already exists")
-        return
-
-    def allocate_kv_cache_on_wake(self) -> dict:
-        assert hasattr(self, "_shadow_kv_cache_config"), (
-            "_shadow_kv_cache_config not set"
-        )
-        assert hasattr(self, "_shadow_kernel_block_sizes"), (
-            "_shadow_kernel_block_sizes not set"
-        )
-
-        config = self._shadow_kv_cache_config
-        kv_cache_bytes = sum(t.size for t in config.kv_cache_tensors)
-
-        free_bytes, _ = torch.cuda.mem_get_info()
-        if free_bytes < kv_cache_bytes:
-            logger.info(
-                "[Shadow] Waiting for GPU memory (need %.2f GiB, free %.2f GiB)",
-                kv_cache_bytes / (1 << 30),
-                free_bytes / (1 << 30),
-            )
-            deadline = time.monotonic() + 60.0
-            while free_bytes < kv_cache_bytes:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(
-                        f"Timed out waiting for GPU memory: "
-                        f"need {kv_cache_bytes / (1 << 30):.2f} GiB, "
-                        f"free {free_bytes / (1 << 30):.2f} GiB"
-                    )
-                time.sleep(0.5)
-                free_bytes = torch.cuda.mem_get_info()[0]
-            logger.info(
-                "[Shadow] GPU memory available (free %.2f GiB), proceeding",
-                free_bytes / (1 << 30),
-            )
-
-        logger.info("[Shadow] Allocating KV cache on wake")
-
-        from vllm.config import set_current_vllm_config
-
-        with set_current_vllm_config(self.vllm_config):
-            kv_caches = self.initialize_kv_cache_tensors(
-                config,
-                self._shadow_kernel_block_sizes,
-            )
-
-        # Re-register with KV transfer group (skipped at init since kv_caches was {}).
-        # Mirrors GPUModelRunner.initialize_kv_cache() — update if upstream changes.
-        try:
-            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                get_kv_transfer_group,
-                has_kv_transfer_group,
-            )
-
-            if has_kv_transfer_group() and kv_caches:
-                kv_transfer_group = get_kv_transfer_group()
-                kv_transfer_group.register_kv_caches(kv_caches)
-                logger.debug("[Shadow] Registered KV caches with transfer group")
-        except ImportError:
-            logger.debug("[Shadow] KV transfer group not available")
-
-        total_bytes = sum(t.numel() * t.element_size() for t in kv_caches.values())
-        logger.info(
-            "[Shadow] Allocated KV cache on wake: %.2f GiB (%d tensors)",
-            total_bytes / (1 << 30),
-            len(kv_caches),
-        )
-
-        return kv_caches
-
-    GPUModelRunner.allocate_kv_cache_on_wake = allocate_kv_cache_on_wake
-    _allocate_kv_cache_on_wake_added = True
-    logger.info("[GMS Patch] Added GPUModelRunner.allocate_kv_cache_on_wake")
-
-
-def patch_cudagraph_mode_escalation() -> None:
-    """Clamp cudagraph_mode to PIECEWISE if vLLM escalates to FULL_AND_PIECEWISE."""
-    try:
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    except ImportError:
-        return
-
-    if getattr(GPUModelRunner, "_shadow_cg_escalation_patched", False):
-        return
-
-    from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-
-    original_init_keys = CudagraphDispatcher.initialize_cudagraph_keys
-
-    def patched_initialize_cudagraph_keys(self, cudagraph_mode, *args, **kwargs):
-        from vllm.config import CUDAGraphMode
-
-        if cudagraph_mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
-            logger.info(
-                "[Shadow] Clamping cudagraph_mode from %s to PIECEWISE",
-                cudagraph_mode.name,
-            )
-            cudagraph_mode = CUDAGraphMode.PIECEWISE
-        return original_init_keys(self, cudagraph_mode, *args, **kwargs)
-
-    CudagraphDispatcher.initialize_cudagraph_keys = patched_initialize_cudagraph_keys
-    GPUModelRunner._shadow_cg_escalation_patched = True
-    logger.info("[GMS Patch] Patched cudagraph mode escalation for shadow mode")
-
-
 # =============================================================================
 # Patch application helper
 # =============================================================================
 
 
 def apply_shadow_mode_patches() -> None:
-    """Apply all shadow mode patches. No-ops if not in shadow mode."""
+    """Apply shadow mode monkey-patches. No-ops if not in shadow mode."""
     if not is_shadow_mode():
         return
 
     patch_request_memory()
-    patch_determine_available_memory()
     patch_register_kv_caches()
-    patch_initialize_kv_cache_tensors()
-    patch_get_slot_mappings()
-    patch_allocate_kv_cache_on_wake()
-    patch_cudagraph_mode_escalation()
     logger.info("[GMS Patch] Shadow mode patches applied")
