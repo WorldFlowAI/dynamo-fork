@@ -25,9 +25,9 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
 | Text-to-Text | `/v1/chat/completions` | `text` (default) |
 | Text-to-Image | `/v1/chat/completions`, `/v1/images/generations` | `image` |
 | Text-to-Video | `/v1/videos` | `video` |
-| Text-to-Audio (TTS) | `/v1/audio/speech`, `/v1/chat/completions` | `audio` |
+| Text-to-Audio (TTS) | `/v1/audio/speech` | `audio` |
 
-The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, both `/v1/audio/speech` and `/v1/chat/completions` (returns inline base64 audio) are available.
+The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, the worker serves `/v1/audio/speech`.
 
 ## Tested Models
 
@@ -36,7 +36,7 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
 | Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
-| Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`, `Qwen/Qwen3-TTS-12Hz-0.6B-Base` |
+| Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` |
 
 To run a non-default model, pass `--model` to any launch script:
 
@@ -170,47 +170,63 @@ Launch using the provided script with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`:
 bash examples/backends/vllm/launch/agg_omni_audio.sh
 ```
 
-### Via `/v1/audio/speech`
+### CustomVoice (predefined speakers)
 
 ```bash
-curl -s http://localhost:8000/v1/audio/speech \
+curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    "input": "Hello, how are you today?",
+    "input": "Hello, how are you?",
     "voice": "vivian",
-    "response_format": "url"
-  }'
+    "language": "English"
+  }' --output output.wav
 ```
 
-The response returns a JSON object with the audio URL:
+### CustomVoice with style instructions
 
-```json
-{
-  "id": "...",
-  "object": "audio.speech",
-  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-  "status": "completed",
-  "data": [{"url": "file:///tmp/dynamo_media/audios/req-abc123.wav"}]
-}
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "I am so excited!",
+    "voice": "vivian",
+    "instructions": "Speak with great enthusiasm"
+  }' --output excited.wav
 ```
 
-The `/v1/audio/speech` endpoint also accepts NVIDIA extensions via the `nvext` field:
+### VoiceDesign (describe a voice)
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_audio.sh --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "Hello world",
+    "task_type": "VoiceDesign",
+    "instructions": "A warm, friendly female voice with a gentle tone"
+  }' --output voicedesign.wav
+```
+
+### Parameters
+
+The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/qwen3_tts/) API format. All TTS-specific parameters are top-level fields:
 
 | Field | Description | Default |
 |---|---|---|
-| `nvext.language` | Language (Auto, Chinese, English, Japanese, etc.) | Auto |
-| `nvext.task_type` | Task type: CustomVoice, VoiceDesign, or Base | -- |
-| `nvext.max_new_tokens` | Maximum tokens to generate | 2048 |
-| `nvext.ref_audio` | Reference audio URL/base64 (for voice cloning) | -- |
-| `nvext.ref_text` | Reference transcript (for voice cloning) | -- |
-| `nvext.seed` | Random seed for reproducibility | -- |
+| `input` | Text to synthesize (required) | -- |
+| `model` | TTS model name | auto-detected |
+| `voice` | Speaker name (e.g., vivian, ryan). Validated against model config. | Vivian |
+| `response_format` | Audio format: wav, mp3, pcm, flac, aac, opus | wav |
+| `speed` | Speed factor (0.25-4.0) | 1.0 |
+| `task_type` | CustomVoice, VoiceDesign, or Base (Qwen3-TTS) | CustomVoice |
+| `language` | Language code. Validated against model config. | Auto |
+| `instructions` | Voice style/emotion description. Required for VoiceDesign. | -- |
+| `ref_audio` | Reference audio URL or base64 data URI. Required for Base. | -- |
+| `ref_text` | Transcript of reference audio (Base task) | -- |
+| `max_new_tokens` | Maximum tokens to generate (1-4096) | 2048 |
 
-To use a different TTS model:
-
-```bash
-bash examples/backends/vllm/launch/agg_omni_audio.sh --model Qwen/Qwen3-TTS-12Hz-0.6B-Base
-```
+Available voices and languages are loaded dynamically from the model's `config.json` at startup. Non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
 
 ## CLI Reference
 
@@ -248,3 +264,5 @@ Omni pipelines are configured via YAML stage configs. See [`examples/backends/vl
 - Only text prompts are supported as input (no multimodal input yet).
 - KV cache events are not published for omni workers.
 - Each worker supports a single output modality at a time.
+- Audio: streaming (`stream: true`) is not yet supported.
+- Audio: Base task (voice cloning) is not yet supported.

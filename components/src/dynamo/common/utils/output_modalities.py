@@ -92,8 +92,6 @@ def parse_request_type(
         return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
 
     if modality is OutputModality.AUDIO:
-        if "messages" in raw_request:
-            return raw_request, RequestType.CHAT_COMPLETION
         return NvCreateAudioSpeechRequest(**raw_request), RequestType.AUDIO_GENERATION
 
     # Text Modality
