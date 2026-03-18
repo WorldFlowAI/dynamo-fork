@@ -79,7 +79,7 @@ impl PromptFormatter {
                     mdc.prompt_context
                         .clone()
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
-                    exclude_tools,
+                    mdc.runtime_config.exclude_tools_when_tool_choice_none,
                 )
             }
             PromptFormatterArtifact::HfChatTemplate { .. } => Err(anyhow::anyhow!(
