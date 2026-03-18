@@ -348,7 +348,12 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let tools = req.tools();
         // Strip tools when tool_choice is "none" and the flag is enabled, so the model
         // doesn't see tool definitions and generate raw XML tool calls in its response.
-        let tools = if self.exclude_tools_when_tool_choice_none {
+        // Read from env var at request time (not init time) because the formatter may be
+        // created through code paths that don't pass the flag (e.g., remote MDC discovery).
+        let exclude_tools_flag = std::env::var("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE")
+            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+            .unwrap_or(self.exclude_tools_when_tool_choice_none);
+        let tools = if exclude_tools_flag {
             match req.tool_choice() {
                 Some(ref tc) if tc.as_str() == Some("none") => None,
                 _ => tools,
