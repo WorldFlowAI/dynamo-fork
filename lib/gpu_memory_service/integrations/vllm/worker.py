@@ -30,6 +30,7 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
 from gpu_memory_service.integrations.vllm.patches import (
     apply_shadow_mode_patches,
+    is_shadow_mode,
     patch_memory_snapshot,
 )
 
@@ -42,7 +43,7 @@ register_gms_loader()
 patch_empty_cache()
 patch_memory_snapshot()
 
-# Apply shadow mode patches (check SHADOW_SKIP_KV_CACHE at runtime)
+# Apply shadow mode patches (check DYN_GMS_SHADOW_MODE at runtime)
 # These patches are safe to apply even for non-shadow engines because
 # they check the environment variable at runtime before modifying behavior.
 apply_shadow_mode_patches()
@@ -95,7 +96,7 @@ class GMSWorker(Worker):
 
         # Shadow mode: set init phase flag on model_runner
         # This tells patches to no-op (e.g., skip KV cache allocation)
-        if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
+        if is_shadow_mode():
             if hasattr(self, "model_runner") and self.model_runner is not None:
                 self.model_runner._shadow_init_phase = True
                 logger.info("[Shadow] Set _shadow_init_phase=True on model_runner")

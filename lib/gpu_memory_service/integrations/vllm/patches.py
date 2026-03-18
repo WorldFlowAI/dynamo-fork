@@ -9,7 +9,7 @@ module is imported:
 
 Note: The torch.cuda.empty_cache patch is in integrations/common/patches.py
 
-Shadow mode patches (applied when SHADOW_SKIP_KV_CACHE=1):
+Shadow mode patches (applied when DYN_GMS_SHADOW_MODE=1):
 - request_memory patch (bypasses memory check for shadow engines)
 - register_kv_caches patch (skips NIXL registration when no KV cache)
 - initialize_kv_cache_tensors patch (no-ops during shadow init phase)
@@ -49,13 +49,13 @@ _get_slot_mappings_patched = False
 _allocate_kv_cache_on_wake_added = False
 
 
-def _is_shadow_mode() -> bool:
+def is_shadow_mode() -> bool:
     """Check if shadow mode is enabled via environment variable.
 
     This is used for patches that need to check at import/init time.
     For runtime behavior, patches should check model_runner._shadow_init_phase.
     """
-    return os.environ.get("SHADOW_SKIP_KV_CACHE", "0") == "1"
+    return os.environ.get("DYN_GMS_SHADOW_MODE", "0") == "1"
 
 
 # =============================================================================
@@ -121,7 +121,7 @@ def patch_request_memory() -> None:
     startup. This fails for shadow engines because the primary engine is
     consuming GPU memory for its KV cache.
 
-    Note: This patch checks SHADOW_SKIP_KV_CACHE env var (not _shadow_init_phase)
+    Note: This patch checks DYN_GMS_SHADOW_MODE env var (not _shadow_init_phase)
     because it runs before model_runner exists.
     """
     global _request_memory_patched
@@ -139,7 +139,7 @@ def patch_request_memory() -> None:
 
     def patched_request_memory(init_snapshot, cache_config):
         """Patched request_memory that skips check in shadow mode."""
-        if _is_shadow_mode():
+        if is_shadow_mode():
             requested_memory = int(
                 init_snapshot.total_memory * cache_config.gpu_memory_utilization
             )
@@ -174,7 +174,7 @@ def patch_determine_available_memory() -> None:
     will be dead). The profiler still runs (needed for torch.compile), but we
     override the returned available_memory with the correct projected value.
     """
-    if not _is_shadow_mode():
+    if not is_shadow_mode():
         return
 
     try:
@@ -456,7 +456,7 @@ def patch_cudagraph_mode_escalation() -> None:
     This patch wraps _check_and_update_cudagraph_mode to clamp the resolved
     mode back to PIECEWISE when in shadow init with empty KV caches.
     """
-    if not _is_shadow_mode():
+    if not is_shadow_mode():
         return
 
     try:
@@ -472,7 +472,7 @@ def patch_cudagraph_mode_escalation() -> None:
     original_init_keys = CudagraphDispatcher.initialize_cudagraph_keys
 
     def patched_initialize_cudagraph_keys(self, cudagraph_mode, *args, **kwargs):
-        if _is_shadow_mode():
+        if is_shadow_mode():
             from vllm.config import CUDAGraphMode
 
             if cudagraph_mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):

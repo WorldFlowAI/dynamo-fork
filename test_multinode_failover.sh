@@ -99,7 +99,7 @@ start_engine_leader() {
         --nnodes 2 --node-rank 0 \
         --master-addr 127.0.0.1 --master-port "$master_port" \
         --load-format gms \
-        --gms-mode shadow \
+        --gms-shadow-mode \
         > "$LOG_DIR/${label}_leader.log" 2>&1 &
     echo $! > "$LOG_DIR/${label}_leader.pid"
     echo "$label leader PID: $(cat "$LOG_DIR/${label}_leader.pid")"
@@ -128,7 +128,7 @@ start_engine_worker() {
     echo "Starting $label worker (headless, node-rank 1)..."
     setsid \
     env CUDA_VISIBLE_DEVICES=1 \
-    SHADOW_SKIP_KV_CACHE=1 \
+    DYN_GMS_SHADOW_MODE=1 \
     python3 -m dynamo.vllm \
         --model "$MODEL_NAME" \
         --tensor-parallel-size 2 \

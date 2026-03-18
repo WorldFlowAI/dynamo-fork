@@ -230,7 +230,7 @@ python3 -m dynamo.vllm \
     --model "$MODEL_NAME" \
     -tp "$TP_SIZE" \
     --load-format gms \
-    --gms-mode shadow \
+    --gms-shadow-mode \
     > "$ENGINE_B_LOG" 2>&1 &
 ENGINE_B_PID=$!
 echo "Engine B PID: $ENGINE_B_PID (shadow mode)"

@@ -98,7 +98,7 @@ def run_dynamo_headless(config: Config) -> None:
     # Shadow mode: force PIECEWISE cudagraph mode to match the leader's
     # override. Without this, the headless worker's backend resolution may
     # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
-    if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
+    if os.environ.get("DYN_GMS_SHADOW_MODE") == "1":
         import json as _json
 
         cc = config.engine_args.compilation_config
@@ -491,8 +491,8 @@ def setup_vllm_engine(
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 
         # Shadow mode configuration
-        if config.gms_mode == "shadow":
-            os.environ["SHADOW_SKIP_KV_CACHE"] = "1"
+        if config.gms_shadow_mode:
+            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
             logger.info(
                 "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
             )
@@ -1025,7 +1025,7 @@ async def init(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    if config.gms_mode == "shadow":
+    if config.gms_shadow_mode:
         # Shadow mode: lock-driven activation.
         # Flow: sleep → startup probe passes → block on lock → wake → register → serve.
         # The engine is NOT registered with discovery until after the lock is acquired
