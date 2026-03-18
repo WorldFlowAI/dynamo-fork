@@ -74,20 +74,6 @@ impl PromptFormatter {
                         })?;
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
                 }
-                // Read exclude_tools_when_tool_choice_none from env var
-                // (set by Python runtime via --exclude-tools-when-tool-choice-none flag).
-                // Default: true (strip tools when tool_choice=none).
-                // Parsing matches Python's semantics: true/1/yes/on → true, everything else → false.
-                let exclude_tools_raw = std::env::var("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE");
-                let exclude_tools = exclude_tools_raw
-                    .as_ref()
-                    .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
-                    .unwrap_or(true);
-                tracing::info!(
-                    "exclude_tools_when_tool_choice_none={} (env={:?})",
-                    exclude_tools,
-                    exclude_tools_raw.as_deref().unwrap_or("<not set>")
-                );
                 Self::from_parts(
                     config,
                     mdc.prompt_context

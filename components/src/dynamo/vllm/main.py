@@ -608,10 +608,9 @@ async def register_vllm_model(
     if model_type != ModelType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
-    # Propagate to env var so the Rust preprocessor can read it at init time
-    os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"] = str(
+    runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
-    ).lower()
+    )
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)

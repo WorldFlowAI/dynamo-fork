@@ -274,10 +274,6 @@ async def async_main():
     else:
         os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
 
-    os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"] = str(
-        config.exclude_tools_when_tool_choice_none
-    ).lower()
-
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
