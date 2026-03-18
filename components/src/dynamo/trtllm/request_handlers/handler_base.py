@@ -194,11 +194,20 @@ class HandlerBase(BaseGenerativeHandler):
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _handle_cancellation(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: GenerationResult,
+        context: Context,
+        prefill_done_event: Optional[asyncio.Event] = None,
+        first_token_event: Optional[asyncio.Event] = None,
     ):
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
+
+        In disaggregated serving, abort is conditionally suppressed to protect
+        in-flight KV cache transfers:
+        - Prefill: abort suppressed after context computation (prefill_done_event set)
+        - Decode: abort delayed until first token received (first_token_event)
 
         Raise GeneratorExit if shutdown event is triggered.
         """
@@ -218,12 +227,46 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation unless disabled
+            # Shutdown always aborts immediately, bypassing disagg guards
+            if shutdown_task in done:
+                logging.info(
+                    f"[FIX-DISAGG] Shutdown detected for request {context.id()}, "
+                    "bypassing disagg event guards"
+                )
+                generation_result.abort()
+                # Clean up pending tasks before raising
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                raise GeneratorExit("Engine was shut down during generation.")
+
+            # Abort the generation unless disabled or suppressed by disagg guards
             if self.disable_request_abort:
                 logging.debug(
                     f"Request ID {context.id()} cancelled but abort() skipped "
                     "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
                 )
+            elif prefill_done_event is not None and prefill_done_event.is_set():
+                # Prefill context done, KV transfer may be in flight — suppress abort
+                logging.info(
+                    f"[FIX-DISAGG] Prefill abort suppressed for request {context.id()} "
+                    "(context done, protecting KV transfer)"
+                )
+            elif first_token_event is not None and not first_token_event.is_set():
+                # Decode waiting for KV — delay abort until first token
+                logging.info(
+                    f"[FIX-DISAGG] Decode abort delayed for request {context.id()} "
+                    "(waiting for first token)"
+                )
+                await first_token_event.wait()
+                logging.info(
+                    f"[FIX-DISAGG] Decode first token received for request {context.id()}, "
+                    "proceeding with abort"
+                )
+                generation_result.abort()
             else:
                 generation_result.abort()
                 logging.debug(f"Aborted Request ID: {context.id()}")
@@ -236,21 +279,25 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise GeneratorExit if cancellation is due to shutdown event triggered
-            if shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
-
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
 
     @asynccontextmanager
     async def _cancellation_monitor(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: GenerationResult,
+        context: Context,
+        prefill_done_event: Optional[asyncio.Event] = None,
+        first_token_event: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
+
+        In disaggregated serving, event guards protect KV transfers from abort:
+        - prefill_done_event: suppresses abort after context completion
+        - first_token_event: delays decode abort until first token received
 
         Raise GeneratorExit if shutdown event is triggered.
 
@@ -258,7 +305,11 @@ class HandlerBase(BaseGenerativeHandler):
             asyncio.Task: The cancellation monitoring task
         """
         monitor_task = asyncio.create_task(
-            self._handle_cancellation(generation_result, context)
+            self._handle_cancellation(
+                generation_result, context,
+                prefill_done_event=prefill_done_event,
+                first_token_event=first_token_event,
+            )
         )
 
         try:
@@ -811,9 +862,34 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
+            # Create disagg event guards to protect KV cache transfers from abort
+            prefill_done_event = (
+                asyncio.Event()
+                if self.disaggregation_mode == DisaggregationMode.PREFILL
+                else None
+            )
+            first_token_event = (
+                asyncio.Event()
+                if self.disaggregation_mode == DisaggregationMode.DECODE
+                else None
+            )
+
             # Monitor for cancellation triggers and cancel by calling generation_result.abort()
-            async with self._cancellation_monitor(generation_result, context):
+            async with self._cancellation_monitor(
+                generation_result, context,
+                prefill_done_event=prefill_done_event,
+                first_token_event=first_token_event,
+            ):
+                _first_result_signaled = False
                 async for res in generation_result:
+                    # Signal disagg event guards on first result
+                    if not _first_result_signaled:
+                        if prefill_done_event is not None:
+                            prefill_done_event.set()
+                        if first_token_event is not None:
+                            first_token_event.set()
+                        _first_result_signaled = True
+
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
                     if self.first_generation and self.publisher:

@@ -185,8 +185,16 @@ class PrefillHandler(HandlerBase):
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
 
+            # NVBugs 5969206: Do NOT drop the prefill response when context
+            # is killed. The response must reach the frontend so decode can
+            # receive KV transfer params. Dropping here orphans the KV transfer
+            # (no receiver) and leaks blocks permanently.
+            # Cancel is handled by _cancellation_monitor's event guards instead.
             if context.is_stopped() or context.is_killed():
-                return
+                logging.info(
+                    f"[FIX-DISAGG] Prefill yielding response despite killed context "
+                    f"for request {context.id()} (protecting KV transfer)"
+                )
 
             # Return response with disaggregated_params to frontend
             yield res

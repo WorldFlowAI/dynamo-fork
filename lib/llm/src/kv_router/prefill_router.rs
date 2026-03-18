@@ -626,7 +626,10 @@ impl
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
+                // NVBugs 5969206: Do NOT link prefill as child of engine context.
+                // Kill propagation tears down the RPC transport, interrupting NIXL
+                // KV cache transfers and leaking blocks permanently.
+                // engine_ctx.link_child(prefill_context.context());
 
                 // Pass phase permit to spawned task - it drops after first output (record_worker_full complete)
                 // This allows set_phase(Decode) below to proceed only after prefill routing is done
@@ -642,7 +645,8 @@ impl
                 drop(prefill_phase_permit);
 
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
+                // NVBugs 5969206: Do NOT link prefill as child of engine context.
+                // engine_ctx.link_child(prefill_context.context());
 
                 // In Direct mode, pass preselected_worker so execute_prefill uses
                 // router.direct() instead of router.generate() (which bails in Direct mode).
@@ -659,13 +663,16 @@ impl
         }
         .await;
 
-        // Abort if cancelled during prefill
+        // NVBugs 5969206: Do NOT abort decode routing when context is killed.
+        // In disaggregated serving, the prefill may have completed and KV transfer
+        // is in flight. Blocking decode here orphans the transfer (no receiver)
+        // and leaks KV blocks permanently. The decode handler's first_token_event
+        // guard will clean up after KV is received.
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!("Abort entering decode after context is stopped or killed");
-            return Err(anyhow::anyhow!(
-                "Context id {} is stopped or killed",
+            tracing::info!(
+                "[FIX-DISAGG] Context {} killed but allowing decode routing for KV transfer",
                 engine_ctx.id()
-            ));
+            );
         }
 
         // Handle prefill result
