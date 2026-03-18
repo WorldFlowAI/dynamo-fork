@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Multinode Lock-Driven Failover Test (TP=2, 2 nodes × 1 GPU each)
 #
 # Validates the same properties as test_lock_driven_failover.sh but with

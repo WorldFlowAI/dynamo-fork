@@ -774,8 +774,8 @@ impl DistributedRuntime {
 
     /// Set the system-level health status (Ready / NotReady).
     ///
-    /// This controls the Branch 3 fallback in `SystemHealth.get_health_status()`:
-    /// when no endpoint health targets are registered, the probe returns this value.
+    /// Fallback for `SystemHealth.get_health_status()` when no endpoint
+    /// health targets are registered. Endpoint-based health overrides this.
     fn set_health_status(&self, ready: bool) -> PyResult<()> {
         let status = if ready {
             config::HealthStatus::Ready

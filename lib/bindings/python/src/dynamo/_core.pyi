@@ -96,8 +96,8 @@ class DistributedRuntime:
         """
         Set the system-level health status (Ready / NotReady).
 
-        Controls the Branch 3 fallback in SystemHealth.get_health_status():
-        when no endpoint health targets are registered, the probe returns this value.
+        Fallback for SystemHealth.get_health_status() when no endpoint
+        health targets are registered. Endpoint-based health overrides this.
         """
         ...
 
